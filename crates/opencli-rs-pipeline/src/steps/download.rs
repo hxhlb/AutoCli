@@ -64,6 +64,10 @@ impl StepHandler for DownloadStep {
             return execute_article_download(obj.unwrap_or(&serde_json::Map::new()), &ctx, data).await;
         }
 
+        if download_type == "twitter-media" || download_type == "media-batch" {
+            return execute_media_batch_download(obj.unwrap_or(&serde_json::Map::new()), &ctx, data).await;
+        }
+
         // Default: metadata-only download (extract URLs and annotate)
 
         let url = obj
@@ -230,6 +234,151 @@ async fn execute_article_download(
             }]))
         }
     }
+}
+
+/// Execute batch media download (images + videos from a list)
+async fn execute_media_batch_download(
+    params: &serde_json::Map<String, Value>,
+    ctx: &TemplateContext,
+    data: &Value,
+) -> Result<Value, CliError> {
+    let output_dir = params.get("output")
+        .and_then(|v| v.as_str())
+        .map(|s| render_template_str(s, ctx).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| s.to_string()))
+        .unwrap_or_else(|| "./downloads".to_string());
+
+    let prefix = params.get("username")
+        .and_then(|v| v.as_str())
+        .map(|s| render_template_str(s, ctx).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| s.to_string()))
+        .unwrap_or_else(|| "media".to_string());
+
+    let items = data.get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if items.is_empty() {
+        // Data might be the error array itself
+        if data.is_array() {
+            return Ok(data.clone());
+        }
+        return Ok(serde_json::json!([{ "index": 0, "type": "-", "status": "failed", "size": "No media items" }]));
+    }
+
+    let _ = std::fs::create_dir_all(&output_dir);
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+
+    let mut results = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+        let media_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("");
+
+        if url.is_empty() { continue; }
+
+        let idx = i + 1;
+
+        if media_type == "image" {
+            // Direct image download
+            let ext = if url.contains("format=png") { "png" }
+                else if url.contains("format=webp") { "webp" }
+                else { "jpg" };
+            let filename = format!("{}_{:03}.{}", prefix, idx, ext);
+            let filepath = format!("{}/{}", output_dir, filename);
+
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.bytes().await {
+                        Ok(bytes) => {
+                            if std::fs::write(&filepath, &bytes).is_ok() {
+                                let size = format_size(bytes.len());
+                                results.push(serde_json::json!({
+                                    "index": idx, "type": "image", "status": "ok", "size": size
+                                }));
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            results.push(serde_json::json!({
+                "index": idx, "type": "image", "status": "failed", "size": "-"
+            }));
+        } else if media_type == "video" {
+            // Direct video download
+            let filename = format!("{}_{:03}.mp4", prefix, idx);
+            let filepath = format!("{}/{}", output_dir, filename);
+
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.bytes().await {
+                        Ok(bytes) => {
+                            if std::fs::write(&filepath, &bytes).is_ok() {
+                                let size = format_size(bytes.len());
+                                results.push(serde_json::json!({
+                                    "index": idx, "type": "video", "status": "ok", "size": size
+                                }));
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            results.push(serde_json::json!({
+                "index": idx, "type": "video", "status": "failed", "size": "-"
+            }));
+        } else if media_type == "video-tweet" {
+            // Use yt-dlp for tweet videos
+            let filename = format!("{}_{:03}.mp4", prefix, idx);
+            let filepath = format!("{}/{}", output_dir, filename);
+
+            let status = tokio::process::Command::new("yt-dlp")
+                .args(["-f", "best[ext=mp4]/best", "--merge-output-format", "mp4", "-o", &filepath, url])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+
+            match status {
+                Ok(s) if s.success() => {
+                    let size = std::fs::metadata(&filepath)
+                        .map(|m| format_size(m.len() as usize))
+                        .unwrap_or("-".to_string());
+                    results.push(serde_json::json!({
+                        "index": idx, "type": "video", "status": "ok", "size": size
+                    }));
+                }
+                _ => {
+                    results.push(serde_json::json!({
+                        "index": idx, "type": "video", "status": "failed (yt-dlp)", "size": "-"
+                    }));
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Ok(serde_json::json!([{ "index": 0, "type": "-", "status": "no media", "size": "-" }]));
+    }
+
+    info!(count = results.len(), dir = %output_dir, "Media batch download complete");
+    Ok(Value::Array(results))
+}
+
+fn format_size(bytes: usize) -> String {
+    if bytes > 1_000_000_000 { format!("{:.1} GB", bytes as f64 / 1e9) }
+    else if bytes > 1_000_000 { format!("{:.1} MB", bytes as f64 / 1e6) }
+    else if bytes > 1000 { format!("{:.1} KB", bytes as f64 / 1e3) }
+    else { format!("{} bytes", bytes) }
 }
 
 /// Execute yt-dlp download

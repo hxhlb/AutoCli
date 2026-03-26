@@ -37,7 +37,8 @@ A **complete rewrite in pure Rust** based on [OpenCLI](https://github.com/jackwe
 - **55 sites, 333 commands** — Covers Bilibili, Twitter, Reddit, Zhihu, Xiaohongshu, YouTube, Hacker News, and more
 - **Browser session reuse** — Reuse logged-in sessions via Chrome extension, no need to manage tokens
 - **Declarative YAML Pipeline** — Describe data scraping workflows in YAML, add new adapters with zero code
-- **AI-native discovery** — `explore` analyzes website APIs, `synthesize` auto-generates adapters, `cascade` probes authentication strategies
+- **AI-native discovery** — `explore` analyzes website APIs, `generate` auto-creates adapters with one command, `cascade` probes authentication strategies
+- **Download media & articles** — Download videos (via yt-dlp), articles as Markdown with images localized
 - **External CLI passthrough** — Integrate GitHub CLI, Docker, Kubernetes, and other tools
 - **Multi-format output** — table, JSON, YAML, CSV, Markdown
 - **Single binary** — Compiles to a 4MB static binary with zero runtime dependencies
@@ -207,16 +208,56 @@ Run `opencli-rs --help` to see all available commands.
 
 ## AI Discovery Capabilities
 
+One command to discover APIs, auto-generate adapters, and start using them immediately:
+
 ```bash
-# Explore website APIs
-opencli-rs explore https://example.com
+# One-shot: explore + synthesize + save adapter
+opencli-rs generate https://www.example.com --goal hot
+# ✅ Generated adapter: example hot
+#    Saved to: ~/.opencli-rs/adapters/example/hot.yaml
+#    Run it now: opencli-rs example hot
 
-# Auto-detect authentication strategies
-opencli-rs cascade https://api.example.com/data
+# Explore website API surface (endpoints, framework, stores)
+opencli-rs explore https://www.example.com --site mysite
 
-# One-click adapter generation
-opencli-rs generate https://example.com --goal "hot posts"
+# With interactive fuzzing (click buttons to trigger hidden APIs)
+opencli-rs explore https://www.example.com --auto --click "Comments,CC"
+
+# Auto-detect authentication strategy (PUBLIC → COOKIE → HEADER)
+opencli-rs cascade https://api.example.com/hot
 ```
+
+**Discovery features:**
+- `.json` suffix probing (Reddit-style REST discovery)
+- `__INITIAL_STATE__` extraction (SSR sites like Bilibili, Xiaohongshu)
+- Pinia/Vuex store discovery and action mapping
+- Auto search endpoint discovery with `--goal search`
+- Framework detection (Vue/React/Next.js/Nuxt)
+
+## Download
+
+Download media and articles from supported sites:
+
+```bash
+# Download Bilibili video (requires yt-dlp)
+opencli-rs bilibili download BV1xxx --output ./videos --quality 1080p
+
+# Download Zhihu article as Markdown with images
+opencli-rs zhihu download "https://zhuanlan.zhihu.com/p/xxx" --output ./articles
+
+# Download WeChat article as Markdown with images
+opencli-rs weixin download "https://mp.weixin.qq.com/s/xxx" --output ./articles
+
+# Download Twitter/X media (images + videos)
+opencli-rs twitter download nash_su --limit 10 --output ./twitter
+opencli-rs twitter download --tweet-url "https://x.com/user/status/123" --output ./twitter
+```
+
+**Download features:**
+- Videos via yt-dlp (cookies extracted from browser automatically, no Keychain prompt)
+- Articles as Markdown with YAML frontmatter (title, author, date, source)
+- Images downloaded and localized (remote URLs replaced with local `images/img_001.jpg`)
+- Output directory structure: `output/article_title/title.md` + `output/article_title/images/`
 
 ## External CLI Integration
 

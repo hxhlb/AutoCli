@@ -37,7 +37,8 @@
 - **55サイト、333コマンド** —— Bilibili、Twitter、Reddit、知乎、小紅書、YouTube、Hacker News などをカバー
 - **ブラウザセッション再利用** —— Chrome 拡張機能でログイン済み状態を再利用、トークン管理不要
 - **宣言型 YAML Pipeline** —— YAML でデータ取得フローを記述、コードゼロで新しいアダプターを追加
-- **AI ネイティブディスカバリー** —— `explore` でサイト API を分析、`synthesize` でアダプターを自動生成、`cascade` で認証ストラテジーを探索
+- **AI ネイティブディスカバリー** —— `explore` でサイト API を分析、`generate` で1コマンドでアダプターを自動生成、`cascade` で認証ストラテジーを探索
+- **メディア＆記事ダウンロード** —— 動画ダウンロード（yt-dlp）、記事を Markdown にエクスポート＋画像のローカル保存
 - **外部 CLI パススルー** —— GitHub CLI、Docker、Kubernetes などのツールを統合
 - **複数出力フォーマット** —— table、JSON、YAML、CSV、Markdown
 - **単一バイナリ** —— 4MB の静的バイナリにコンパイル、ランタイム依存ゼロ
@@ -207,16 +208,54 @@ opencli-rs completion fish > ~/.config/fish/completions/opencli-rs.fish
 
 ## AI ディスカバリー機能
 
+1コマンドで API を発見し、アダプターを自動生成、即座に利用可能：
+
 ```bash
-# Web サイトの API を探索
-opencli-rs explore https://example.com
+# ワンショット：探索 + 合成 + アダプター保存
+opencli-rs generate https://www.example.com --goal hot
+# ✅ アダプター生成: example hot
+#    保存先: ~/.opencli-rs/adapters/example/hot.yaml
+#    実行: opencli-rs example hot
 
-# 認証ストラテジーを自動探索
-opencli-rs cascade https://api.example.com/data
+# Web サイトの API を探索（エンドポイント、フレームワーク、Store）
+opencli-rs explore https://www.example.com --site mysite
 
-# ワンクリックでアダプターを生成
-opencli-rs generate https://example.com --goal "hot posts"
+# インタラクティブファジング（ボタンクリックで隠し API を発見）
+opencli-rs explore https://www.example.com --auto --click "コメント,字幕"
+
+# 認証ストラテジー自動検出（PUBLIC → COOKIE → HEADER）
+opencli-rs cascade https://api.example.com/hot
 ```
+
+**ディスカバリー機能：**
+- `.json` サフィックスプローブ（Reddit 式 REST ディスカバリー）
+- `__INITIAL_STATE__` 抽出（Bilibili、小紅書などの SSR サイト）
+- Pinia/Vuex Store 発見とアクションマッピング
+- `--goal search` による検索エンドポイント自動発見
+- フレームワーク検出（Vue/React/Next.js/Nuxt）
+
+## ダウンロード
+
+対応サイトからメディアと記事をダウンロード：
+
+```bash
+# Bilibili 動画ダウンロード（yt-dlp が必要）
+opencli-rs bilibili download BV1xxx --output ./videos --quality 1080p
+
+# 知乎記事を Markdown でダウンロード（画像付き）
+opencli-rs zhihu download "https://zhuanlan.zhihu.com/p/xxx" --output ./articles
+
+# WeChat 公式アカウント記事を Markdown でダウンロード（画像付き）
+opencli-rs weixin download "https://mp.weixin.qq.com/s/xxx" --output ./articles
+
+# Twitter/X メディアダウンロード（画像 + 動画）
+opencli-rs twitter download nash_su --limit 10 --output ./twitter
+```
+
+**ダウンロード機能：**
+- yt-dlp による動画ダウンロード（ブラウザから Cookie を自動取得、システム認証不要）
+- YAML フロントマター付き Markdown エクスポート（タイトル、著者、日付、出典）
+- 画像の自動ダウンロードとローカル化（リモート URL をローカル `images/img_001.jpg` に置換）
 
 ## 外部 CLI 統合
 

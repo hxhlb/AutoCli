@@ -38,7 +38,8 @@
 - **55 个站点、333 个命令** —— 覆盖 Bilibili、Twitter、Reddit、知乎、小红书、YouTube、Hacker News 等
 - **浏览器会话复用** —— 通过 Chrome 扩展复用已登录状态，无需管理 token
 - **声明式 YAML Pipeline** —— 用 YAML 描述数据抓取流程，零代码新增适配器
-- **AI 原生发现** —— `explore` 分析网站 API、`synthesize` 自动生成适配器、`cascade` 探测认证策略
+- **AI 原生发现** —— `explore` 分析网站 API、`generate` 一键生成适配器、`cascade` 探测认证策略
+- **下载媒体和文章** —— 视频下载（yt-dlp）、文章导出为 Markdown 并本地化配图
 - **外部 CLI 透传** —— 集成 GitHub CLI、Docker、Kubernetes 等工具
 - **多格式输出** —— table、JSON、YAML、CSV、Markdown
 - **单一二进制** —— 编译为 4MB 静态二进制，零运行时依赖
@@ -208,16 +209,56 @@ opencli-rs completion fish > ~/.config/fish/completions/opencli-rs.fish
 
 ## AI 发现能力
 
+一行命令发现 API、自动生成适配器、立即可用：
+
 ```bash
-# 探索网站 API
-opencli-rs explore https://example.com
+# 一键：探索 + 合成 + 保存适配器
+opencli-rs generate https://www.example.com --goal hot
+# ✅ 已生成适配器: example hot
+#    保存到: ~/.opencli-rs/adapters/example/hot.yaml
+#    立即运行: opencli-rs example hot
 
-# 自动探测认证策略
-opencli-rs cascade https://api.example.com/data
+# 探索网站 API（端点、框架、Store）
+opencli-rs explore https://www.example.com --site mysite
 
-# 一键生成适配器
-opencli-rs generate https://example.com --goal "hot posts"
+# 交互式模糊测试（点击按钮触发隐藏 API）
+opencli-rs explore https://www.example.com --auto --click "评论,字幕"
+
+# 自动探测认证策略（PUBLIC → COOKIE → HEADER）
+opencli-rs cascade https://api.example.com/hot
 ```
+
+**发现能力：**
+- `.json` 后缀探测（Reddit 风格 REST 发现）
+- `__INITIAL_STATE__` 提取（Bilibili、小红书等 SSR 站点）
+- Pinia/Vuex Store 发现和 Action 映射
+- `--goal search` 自动发现搜索端点
+- 框架检测（Vue/React/Next.js/Nuxt）
+
+## 下载
+
+下载支持站点的媒体和文章：
+
+```bash
+# 下载 B 站视频（需要 yt-dlp）
+opencli-rs bilibili download BV1xxx --output ./videos --quality 1080p
+
+# 下载知乎文章为 Markdown（含配图）
+opencli-rs zhihu download "https://zhuanlan.zhihu.com/p/xxx" --output ./articles
+
+# 下载微信公众号文章为 Markdown（含配图）
+opencli-rs weixin download "https://mp.weixin.qq.com/s/xxx" --output ./articles
+
+# 下载 Twitter/X 媒体（图片 + 视频）
+opencli-rs twitter download nash_su --limit 10 --output ./twitter
+opencli-rs twitter download --tweet-url "https://x.com/user/status/123" --output ./twitter
+```
+
+**下载特性：**
+- 视频通过 yt-dlp 下载（自动从浏览器提取 cookies，无需系统授权）
+- 文章导出为 Markdown + YAML 头信息（标题、作者、日期、来源）
+- 配图自动下载并本地化（远程 URL 替换为本地 `images/img_001.jpg`）
+- 输出结构：`output/文章标题/标题.md` + `output/文章标题/images/`
 
 ## 外部 CLI 集成
 
