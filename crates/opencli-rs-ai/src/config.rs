@@ -8,6 +8,9 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
+    /// AutoCLI token for authenticated API access
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "autocli-token")]
+    pub autocli_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -42,4 +45,15 @@ pub fn load_config() -> Config {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => Config::default(),
     }
+}
+
+/// Save config to ~/.opencli-rs/config.json
+pub fn save_config(config: &Config) -> Result<(), String> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+    let content = serde_json::to_string_pretty(config).map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write config: {}", e))?;
+    Ok(())
 }

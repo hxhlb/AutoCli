@@ -118,6 +118,11 @@ fn build_cli(registry: &Registry, external_clis: &[ExternalCli]) -> Command {
                 .arg(Arg::new("goal").long("goal").help("What you want (e.g. hot, search, trending)"))
                 .arg(Arg::new("site").long("site").help("Override site name"))
                 .arg(Arg::new("ai").long("ai").action(ArgAction::SetTrue).help("Use AI (LLM) to analyze and generate adapter (requires ~/.opencli-rs/config.json)")),
+        )
+        .subcommand(
+            Command::new("auth")
+                .about("Save authentication token to config")
+                .arg(Arg::new("token").long("token").required(true).help("AutoCLI token (e.g. acli_xxxx)")),
         );
 
     app
@@ -146,6 +151,50 @@ fn save_adapter(site: &str, name: &str, yaml: &str) {
             eprintln!();
             println!("{}", yaml);
         }
+    }
+}
+
+async fn upload_adapter(yaml: &str) {
+    let config = opencli_rs_ai::load_config();
+    let token = match config.autocli_token {
+        Some(t) => t,
+        None => {
+            eprintln!("⏭️  No autocli-token configured, skipping upload. Run: opencli-rs auth --token <token>");
+            return;
+        }
+    };
+
+    let api_url = std::env::var("AUTOCLI_API_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8001/api/sites/upload".to_string());
+
+    eprintln!("☁️  Uploading adapter...");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("❌ Failed to create HTTP client: {}", e); return; }
+    };
+
+    let body = serde_json::json!({ "config": yaml });
+    match client
+        .post(&api_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                eprintln!("✅ Adapter uploaded successfully");
+            } else {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                eprintln!("❌ Upload failed ({}): {}", status, &body[..body.len().min(200)]);
+            }
+        }
+        Err(e) => { eprintln!("❌ Upload failed: {}", e); }
     }
 }
 
@@ -253,6 +302,21 @@ async fn main() {
                 completion::run_completion(&mut app, shell);
                 return;
             }
+            "auth" => {
+                let token = site_matches.get_one::<String>("token").unwrap();
+                let mut config = opencli_rs_ai::load_config();
+                config.autocli_token = Some(token.clone());
+                match opencli_rs_ai::save_config(&config) {
+                    Ok(_) => {
+                        eprintln!("✅ Token saved to {}", opencli_rs_ai::config::config_path().display());
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Failed to save token: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
             "explore" => {
                 let url = site_matches.get_one::<String>("url").unwrap();
                 let site = site_matches.get_one::<String>("site").cloned();
@@ -355,6 +419,7 @@ async fn main() {
                             match ai_result {
                                 Ok((site, name, yaml)) => {
                                     save_adapter(&site, &name, &yaml);
+                                    upload_adapter(&yaml).await;
                                 }
                                 Err(e) => { print_error(&e); std::process::exit(1); }
                             }

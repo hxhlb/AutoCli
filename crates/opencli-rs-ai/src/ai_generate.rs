@@ -10,6 +10,237 @@ use crate::config::LlmConfig;
 use crate::explore::detect_site_name;
 use crate::llm::generate_with_llm;
 
+/// Fix evaluate block IIFE: extract JS code, fix bracket issues, ensure proper (async () => { ... })()
+fn fix_evaluate_iife(yaml: &str) -> String {
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut before: Vec<&str> = Vec::new();
+    let mut js_lines: Vec<String> = Vec::new();
+    let mut after: Vec<&str> = Vec::new();
+    let mut eval_indent = 0;
+
+    // Find evaluate block boundaries
+    let mut state = 0; // 0=before, 1=in evaluate, 2=after
+    for line in &lines {
+        match state {
+            0 => {
+                if line.trim_start().starts_with("- evaluate:") {
+                    before.push(line);
+                    state = 1;
+                } else {
+                    before.push(line);
+                }
+            }
+            1 => {
+                if eval_indent == 0 && !line.trim().is_empty() {
+                    eval_indent = line.len() - line.trim_start().len();
+                }
+                // Check if we've left the evaluate block (next pipeline step or top-level key)
+                let trimmed = line.trim_start();
+                let current_indent = line.len() - trimmed.len();
+                if !line.trim().is_empty() && current_indent < eval_indent && !js_lines.is_empty() {
+                    state = 2;
+                    after.push(line);
+                    continue;
+                }
+                // Also detect next pipeline step at same level as "- evaluate:"
+                if trimmed.starts_with("- ") && current_indent < eval_indent && !js_lines.is_empty() {
+                    state = 2;
+                    after.push(line);
+                    continue;
+                }
+                js_lines.push(line.to_string());
+            }
+            _ => {
+                after.push(line);
+            }
+        }
+    }
+
+    if js_lines.is_empty() {
+        return yaml.to_string();
+    }
+
+    // Join all JS lines, strip the indent, and clean up
+    let js_code: String = js_lines.iter()
+        .map(|l| {
+            if l.len() > eval_indent { &l[eval_indent..] } else { l.trim() }
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    // Remove all misplaced })() from the middle, and trailing bare }
+    let mut clean = js_code.trim().to_string();
+
+    // Strip leading (async () => { or async () => { wrapper
+    let has_paren = clean.starts_with("(async");
+    if clean.starts_with("(async () => {") {
+        clean = clean["(async () => {".len()..].to_string();
+    } else if clean.starts_with("async () => {") {
+        clean = clean["async () => {".len()..].to_string();
+    }
+
+    // Strip trailing })() or }
+    let trimmed_end = clean.trim_end();
+    if trimmed_end.ends_with("})()") {
+        clean = trimmed_end[..trimmed_end.len() - 4].to_string();
+    } else if trimmed_end.ends_with("}") {
+        clean = trimmed_end[..trimmed_end.len() - 1].to_string();
+    }
+
+    // Remove any remaining })() that appear in the middle of the code
+    // These are always errors — the IIFE close should only be at the end
+    clean = clean.replace("      })()\n", "");
+    clean = clean.replace("    })()\n", "");
+    clean = clean.replace("})()\n", "");
+    // Also handle })() at end of a line that's not the last
+    let clean_lines: Vec<&str> = clean.lines().collect();
+    let mut fixed_js: Vec<&str> = Vec::new();
+    for line in &clean_lines {
+        if line.trim() == "})()" {
+            continue; // remove stray })()
+        }
+        fixed_js.push(line);
+    }
+    clean = fixed_js.join("\n");
+
+    // Now verify bracket balance in the clean body
+    let mut brace_depth: i32 = 0;
+    for ch in clean.chars() {
+        match ch {
+            '{' => brace_depth += 1,
+            '}' => brace_depth -= 1,
+            _ => {}
+        }
+    }
+    // Add missing closing braces if needed
+    while brace_depth > 0 {
+        clean.push_str("\n}");
+        brace_depth -= 1;
+    }
+    // Remove extra closing braces from the end if needed
+    while brace_depth < 0 {
+        if let Some(pos) = clean.rfind('}') {
+            clean = format!("{}{}", &clean[..pos], &clean[pos + 1..]);
+            brace_depth += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Rebuild with proper IIFE wrapper
+    let indent = " ".repeat(eval_indent);
+    let mut rebuilt = String::new();
+    for line in &before {
+        rebuilt.push_str(line);
+        rebuilt.push('\n');
+    }
+    rebuilt.push_str(&format!("{}(async () => {{\n", indent));
+    for line in clean.trim().lines() {
+        rebuilt.push_str(&format!("{}{}\n", indent, line));
+    }
+    rebuilt.push_str(&format!("{}}})()\n", indent));
+    for line in &after {
+        rebuilt.push_str(line);
+        rebuilt.push('\n');
+    }
+
+    // Remove trailing newline to match original
+    if rebuilt.ends_with('\n') && !yaml.ends_with('\n') {
+        rebuilt.pop();
+    }
+
+    rebuilt
+}
+
+/// Fix common YAML pipeline formatting errors from LLM output.
+fn fix_pipeline_yaml(yaml: &str) -> String {
+    let mut lines: Vec<String> = yaml.lines().map(|l| l.to_string()).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = &lines[i];
+        // Fix: "- navigate: <url>" followed by "    settleMs: N" → nested format
+        if let Some(stripped) = line.trim_start().strip_prefix("- navigate: ") {
+            let url = stripped.trim().to_string();
+            if !url.is_empty() && i + 1 < lines.len() {
+                let next = lines[i + 1].trim_start().to_string();
+                if next.starts_with("settleMs:") {
+                    let indent = line.len() - line.trim_start().len();
+                    let base = " ".repeat(indent);
+                    lines[i] = format!("{}- navigate:", base);
+                    lines.insert(i + 1, format!("{}    url: {}", base, url));
+                    lines[i + 2] = format!("{}    {}", base, next);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    let mut result = lines.join("\n");
+
+    // Fix evaluate block: ensure proper IIFE structure
+    // Extract JS code from evaluate block, fix brackets, rebuild
+    result = fix_evaluate_iife(&result);
+
+    // Remove duplicate "columns:" sections (keep first one)
+    let mut seen_columns = false;
+    let lines3: Vec<&str> = result.lines().collect();
+    let mut final_lines: Vec<&str> = Vec::new();
+    for line in &lines3 {
+        if line.starts_with("columns:") {
+            if seen_columns {
+                continue; // skip duplicate
+            }
+            seen_columns = true;
+        }
+        final_lines.push(line);
+    }
+    if final_lines.len() != lines3.len() {
+        result = final_lines.join("\n");
+    }
+
+    // Remove extra evaluate steps (keep only the first one)
+    // Detect "  - evaluate:" lines — skip the 2nd+ and their content
+    let lines4: Vec<&str> = result.lines().collect();
+    let mut cleaned: Vec<&str> = Vec::new();
+    let mut eval_count = 0;
+    let mut skipping = false;
+    let mut skip_indent = 0;
+    for line in &lines4 {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- evaluate:") {
+            eval_count += 1;
+            if eval_count > 1 {
+                skipping = true;
+                skip_indent = line.len() - trimmed.len();
+                continue;
+            }
+        }
+        if skipping {
+            // Skip lines that belong to the extra evaluate block (indented deeper or blank)
+            if line.trim().is_empty() {
+                continue;
+            }
+            let current_indent = line.len() - line.trim_start().len();
+            if current_indent > skip_indent {
+                continue; // still part of the extra evaluate
+            }
+            // Hit a line at same or lower indent — stop skipping
+            skipping = false;
+            // But also check if this is another pipeline step we should skip
+            if trimmed.starts_with("- ") && !trimmed.starts_with("- evaluate:") {
+                // This is a different step (like "- limit:"), keep it
+            }
+        }
+        cleaned.push(line);
+    }
+    if eval_count > 1 {
+        result = cleaned.join("\n");
+    }
+
+    result
+}
+
 /// Capture all API data from a page for AI analysis.
 /// Installs fetch/XHR interceptors, navigates, scrolls, then collects everything.
 pub async fn capture_page_data(
@@ -80,6 +311,8 @@ pub async fn capture_page_data(
         const meta = {
             url: location.href,
             title: document.title,
+            description: document.querySelector('meta[name="description"]')?.content || '',
+            keywords: document.querySelector('meta[name="keywords"]')?.content || '',
         };
 
         // Framework detection
@@ -97,12 +330,22 @@ pub async fn capture_page_data(
         try { if (window.__NEXT_DATA__) globals.__NEXT_DATA__ = JSON.stringify(window.__NEXT_DATA__).slice(0, 30000); } catch {}
         try { if (window.__NUXT__) globals.__NUXT__ = JSON.stringify(window.__NUXT__).slice(0, 30000); } catch {}
 
+        // Capture rendered HTML of main content area
+        // Try common content containers, fallback to body
+        const contentEl = document.querySelector('main, #content, #app, .content, .main, article, [role="main"]') || document.body;
+        // Remove script/style/svg/noscript tags to reduce size
+        const clone = contentEl.cloneNode(true);
+        clone.querySelectorAll('script, style, svg, noscript, iframe, link').forEach(el => el.remove());
+        // Truncate to reasonable size for LLM context
+        const html = clone.innerHTML.slice(0, 80000);
+
         return {
             meta,
             framework,
             globals,
             intercepted: apiResponses,
             perf_urls: uniqueUrls,
+            html: html,
         };
     })()"#;
 
@@ -146,6 +389,44 @@ pub async fn generate_with_ai(
     }
     if let Some(line) = fixed_yaml.lines().find(|l| l.starts_with("name:")) {
         fixed_yaml = fixed_yaml.replacen(line, &format!("name: {}", goal), 1);
+    }
+
+    // Step 5: Fix common YAML formatting errors from LLM
+    fixed_yaml = fix_pipeline_yaml(&fixed_yaml);
+
+    // Step 6: Inject page meta (title, description, keywords) into YAML header
+    let meta_title = captured.get("meta")
+        .and_then(|m| m.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let meta_description = captured.get("meta")
+        .and_then(|m| m.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let meta_keywords = captured.get("meta")
+        .and_then(|m| m.get("keywords"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let mut meta_lines = String::new();
+    if !meta_title.is_empty() {
+        meta_lines.push_str(&format!("meta_title: \"{}\"\n", meta_title.replace('"', "\\\"")));
+    }
+    if !meta_description.is_empty() {
+        meta_lines.push_str(&format!("meta_description: \"{}\"\n", meta_description.replace('"', "\\\"")));
+    }
+    if !meta_keywords.is_empty() {
+        meta_lines.push_str(&format!("meta_keywords: \"{}\"\n", meta_keywords.replace('"', "\\\"")));
+    }
+
+    if !meta_lines.is_empty() {
+        // Insert after the "site:" line
+        if let Some(pos) = fixed_yaml.find('\n') {
+            fixed_yaml = format!("{}\n{}{}", &fixed_yaml[..pos], meta_lines, &fixed_yaml[pos + 1..]);
+        }
     }
 
     Ok((site, goal.to_string(), fixed_yaml))

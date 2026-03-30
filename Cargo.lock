@@ -966,6 +966,7 @@ dependencies = [
  "opencli-rs-external",
  "opencli-rs-output",
  "opencli-rs-pipeline",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

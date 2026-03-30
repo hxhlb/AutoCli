@@ -26,10 +26,11 @@ pub async fn generate_with_llm(
 
     let user_message = format!(
         "Generate an opencli-rs YAML adapter for site \"{}\" with goal \"{}\".\n\n\
-        IMPORTANT:\n\
+        CRITICAL RULES:\n\
         1. The `name` field MUST be exactly \"{}\".\n\
-        2. First classify the goal into: List/Feed (no args), Search/Query (keyword arg), or Content/Detail (identifier arg). \
-        See the \"Goal Classification and Args Rules\" in the system prompt.\n\
+        2. Choose the best extraction approach: DOM scraping OR API calls. \
+        If the HTML has structured data, use DOM scraping. \
+        If you use API calls, you MUST strictly replicate the original page's request — same HTTP method, same headers, same body, same URL (use Performance API to find it).\n\
         3. Only add required args when the goal genuinely needs user input.\n\n\
         Here is the captured data from the web page:\n\n```json\n{}\n```\n\n\
         Return ONLY the YAML content, no explanation, no markdown fencing. Just the raw YAML.",
