@@ -91,9 +91,46 @@ impl StepHandler for NavigateStep {
 
         pg.goto(&url, None).await?;
 
-        // Wait for page to settle if specified
         if let Some(ms) = settle_ms {
+            // Explicit settleMs: use fixed wait
             tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        } else {
+            // Auto-detect: wait for network idle + DOM stable
+            let wait_js = r#"
+                new Promise((resolve) => {
+                    let lastActivity = Date.now();
+                    let checkCount = 0;
+
+                    // Monitor DOM changes
+                    const observer = new MutationObserver(() => { lastActivity = Date.now(); });
+                    observer.observe(document.body || document.documentElement, {
+                        childList: true, subtree: true, attributes: true
+                    });
+
+                    // Monitor network via Performance API
+                    let lastResourceCount = performance.getEntriesByType('resource').length;
+
+                    const check = () => {
+                        const now = Date.now();
+                        const currentResources = performance.getEntriesByType('resource').length;
+                        if (currentResources !== lastResourceCount) {
+                            lastActivity = now;
+                            lastResourceCount = currentResources;
+                        }
+                        checkCount++;
+                        // Stable for 1.5s or timeout after 15s
+                        if ((now - lastActivity > 1500 && checkCount > 5) || checkCount > 60) {
+                            observer.disconnect();
+                            resolve(true);
+                        } else {
+                            setTimeout(check, 250);
+                        }
+                    };
+                    // Start checking after initial 500ms
+                    setTimeout(check, 500);
+                })
+            "#;
+            let _ = pg.evaluate(wait_js).await;
         }
 
         Ok(data.clone())
