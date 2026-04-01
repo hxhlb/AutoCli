@@ -168,7 +168,7 @@ struct AdapterMatch {
     cmd_name: String,
     description: String,
     author: String,
-    config: String,
+    command_uuid: String,
 }
 
 /// Search server for existing adapter configs matching the URL pattern.
@@ -212,14 +212,44 @@ async fn search_existing_adapters(url: &str, token: &str) -> Result<Vec<AdapterM
         let author = m.get("command").and_then(|c| c.get("author")).and_then(|v| v.as_str())
             .or_else(|| m.get("author").and_then(|v| v.as_str()))
             .unwrap_or("").to_string();
-        let config = m.get("command").and_then(|c| c.get("config")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let command_uuid = m.get("command").and_then(|c| c.get("uuid")).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        if !config.is_empty() {
-            results.push(AdapterMatch { match_type, site_name, cmd_name, description, author, config });
+        if !command_uuid.is_empty() {
+            results.push(AdapterMatch { match_type, site_name, cmd_name, description, author, command_uuid });
         }
     }
 
     Ok(results)
+}
+
+/// Fetch full adapter config by command UUID.
+async fn fetch_adapter_config(command_uuid: &str, token: &str) -> Result<String, String> {
+    let url = opencli_rs_ai::command_config_url(command_uuid);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|_| t("❌ 服务器连接失败，请稍后再试", "❌ Server connection failed, please try again later").to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("{}{}", t("❌ 获取配置失败: ", "❌ Failed to fetch config: "), resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    body.get("config")
+        .and_then(|c| c.get("content"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| t("❌ 配置内容为空", "❌ Config content is empty").to_string())
 }
 
 async fn upload_adapter(yaml: &str) {
@@ -419,17 +449,23 @@ async fn main() {
                                 });
                                 if let Some(i) = idx {
                                     let m = &matches[i];
-                                    let yaml_site = m.config.lines()
-                                        .find(|l| l.starts_with("site:"))
-                                        .and_then(|l| l.strip_prefix("site:"))
-                                        .map(|s| s.trim().trim_matches('"').to_string())
-                                        .unwrap_or_else(|| m.site_name.clone());
-                                    let yaml_name = m.config.lines()
-                                        .find(|l| l.starts_with("name:"))
-                                        .and_then(|l| l.strip_prefix("name:"))
-                                        .map(|s| s.trim().trim_matches('"').to_string())
-                                        .unwrap_or_else(|| m.cmd_name.clone());
-                                    save_adapter(&yaml_site, &yaml_name, &m.config);
+                                    eprintln!("{}", t("📥 正在下载配置...", "📥 Downloading config..."));
+                                    match fetch_adapter_config(&m.command_uuid, &token).await {
+                                        Ok(yaml) => {
+                                            let yaml_site = yaml.lines()
+                                                .find(|l| l.starts_with("site:"))
+                                                .and_then(|l| l.strip_prefix("site:"))
+                                                .map(|s| s.trim().trim_matches('"').to_string())
+                                                .unwrap_or_else(|| m.site_name.clone());
+                                            let yaml_name = yaml.lines()
+                                                .find(|l| l.starts_with("name:"))
+                                                .and_then(|l| l.strip_prefix("name:"))
+                                                .map(|s| s.trim().trim_matches('"').to_string())
+                                                .unwrap_or_else(|| m.cmd_name.clone());
+                                            save_adapter(&yaml_site, &yaml_name, &yaml);
+                                        }
+                                        Err(e) => eprintln!("{}", e),
+                                    }
                                 }
                             }
                             Err(_) => {
@@ -661,19 +697,28 @@ async fn main() {
                                                 if let Some(i) = idx {
                                                     let m = &matches[i];
                                                     // Extract site and name from YAML config content, not server's display name
-                                                    let yaml_site = m.config.lines()
-                                                        .find(|l| l.starts_with("site:"))
-                                                        .and_then(|l| l.strip_prefix("site:"))
-                                                        .map(|s| s.trim().trim_matches('"').to_string())
-                                                        .unwrap_or_else(|| m.site_name.clone());
-                                                    let yaml_name = m.config.lines()
-                                                        .find(|l| l.starts_with("name:"))
-                                                        .and_then(|l| l.strip_prefix("name:"))
-                                                        .map(|s| s.trim().trim_matches('"').to_string())
-                                                        .unwrap_or_else(|| m.cmd_name.clone());
-                                                    save_adapter(&yaml_site, &yaml_name, &m.config);
-                                                    let _ = page.close().await;
-                                                    return;
+                                                    eprintln!("{}", t("📥 正在下载配置...", "📥 Downloading config..."));
+                                                    match fetch_adapter_config(&m.command_uuid, &token).await {
+                                                        Ok(yaml) => {
+                                                            let yaml_site = yaml.lines()
+                                                                .find(|l| l.starts_with("site:"))
+                                                                .and_then(|l| l.strip_prefix("site:"))
+                                                                .map(|s| s.trim().trim_matches('"').to_string())
+                                                                .unwrap_or_else(|| m.site_name.clone());
+                                                            let yaml_name = yaml.lines()
+                                                                .find(|l| l.starts_with("name:"))
+                                                                .and_then(|l| l.strip_prefix("name:"))
+                                                                .map(|s| s.trim().trim_matches('"').to_string())
+                                                                .unwrap_or_else(|| m.cmd_name.clone());
+                                                            save_adapter(&yaml_site, &yaml_name, &yaml);
+                                                            let _ = page.close().await;
+                                                            return;
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("{}", e);
+                                                            need_ai_generate = true;
+                                                        }
+                                                    }
                                                 } else {
                                                     need_ai_generate = true;
                                                 }

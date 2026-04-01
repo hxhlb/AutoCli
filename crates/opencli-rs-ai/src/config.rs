@@ -33,6 +33,11 @@ pub fn upload_url() -> String {
     format!("{}/api/sites/upload", api_base())
 }
 
+/// Get the command config endpoint URL
+pub fn command_config_url(command_uuid: &str) -> String {
+    format!("{}/api/sites/commands/{}/config", api_base(), command_uuid)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LlmConfig {
     /// API endpoint URL (e.g., "https://api.anthropic.com/v1/messages", "https://api.openai.com/v1/chat/completions")

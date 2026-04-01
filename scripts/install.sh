@@ -37,9 +37,9 @@ esac
 
 TARGET="${ARCH}-${OS}"
 
-# Get latest version
+# Get latest version (via redirect, avoids API rate limit)
 info "Detecting latest version..."
-VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+VERSION=$(curl -fsSI "https://github.com/${REPO}/releases/latest" | grep -i "location:" | sed -E 's/.*\/tag\/(.*)/\1/' | tr -d '\r\n')
 if [ -z "$VERSION" ]; then
     error "Could not detect latest version. Check https://github.com/${REPO}/releases"
 fi
