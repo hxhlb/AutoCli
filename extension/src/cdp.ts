@@ -10,13 +10,13 @@
 
 const attached = new Set<number>();
 
-/** Check if a URL can be attached via CDP */
+/** Check if a URL can be attached via CDP — only allow http(s) and blank pages. */
 function isDebuggableUrl(url?: string): boolean {
   if (!url) return true;  // empty/undefined = tab still loading, allow it
-  return !url.startsWith('chrome://') && !url.startsWith('chrome-extension://');
+  return url.startsWith('http://') || url.startsWith('https://') || url === 'about:blank' || url.startsWith('data:');
 }
 
-async function ensureAttached(tabId: number): Promise<void> {
+export async function ensureAttached(tabId: number, aggressiveRetry: boolean = false): Promise<void> {
   // Verify the tab URL is debuggable before attempting attach
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -45,23 +45,56 @@ async function ensureAttached(tabId: number): Promise<void> {
     }
   }
 
-  try {
-    await chrome.debugger.attach({ tabId }, '1.3');
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const hint = msg.includes('chrome-extension://')
+  // Retry attach up to 3 times — other extensions (1Password, Playwright MCP Bridge)
+  // can temporarily interfere with chrome.debugger. A short delay usually resolves it.
+  // Normal commands: 2 retries, 500ms delay (fast fail for non-operate use)
+  // Operate commands: 5 retries, 1500ms delay (aggressive, tolerates extension interference)
+  const MAX_ATTACH_RETRIES = aggressiveRetry ? 5 : 2;
+  const RETRY_DELAY_MS = aggressiveRetry ? 1500 : 500;
+  let lastError = '';
+
+  for (let attempt = 1; attempt <= MAX_ATTACH_RETRIES; attempt++) {
+    try {
+      // Force detach first to clear any stale state from other extensions
+      try { await chrome.debugger.detach({ tabId }); } catch { /* ignore */ }
+      await chrome.debugger.attach({ tabId }, '1.3');
+      lastError = '';
+      break; // Success
+    } catch (e: unknown) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (attempt < MAX_ATTACH_RETRIES) {
+        console.warn(`[autocli] attach attempt ${attempt}/${MAX_ATTACH_RETRIES} failed: ${lastError}, retrying in ${RETRY_DELAY_MS}ms...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+        // Re-verify tab URL before retrying (it may have changed)
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (!isDebuggableUrl(tab.url)) {
+            lastError = `Tab URL changed to ${tab.url} during retry`;
+            break; // Don't retry if URL became un-debuggable
+          }
+        } catch {
+          lastError = `Tab ${tabId} no longer exists`;
+          break;
+        }
+      }
+    }
+  }
+
+  if (lastError) {
+    // Log detailed diagnostics for debugging extension conflicts
+    let finalUrl = 'unknown';
+    let finalWindowId = 'unknown';
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      finalUrl = tab.url ?? 'undefined';
+      finalWindowId = String(tab.windowId);
+    } catch { /* tab gone */ }
+    console.warn(`[autocli] attach failed for tab ${tabId}: url=${finalUrl}, windowId=${finalWindowId}, error=${lastError}`);
+
+    const hint = lastError.includes('chrome-extension://')
       ? '. Tip: another Chrome extension may be interfering — try disabling other extensions'
       : '';
-    if (msg.includes('Another debugger is already attached')) {
-      try { await chrome.debugger.detach({ tabId }); } catch { /* ignore */ }
-      try {
-        await chrome.debugger.attach({ tabId }, '1.3');
-      } catch {
-        throw new Error(`attach failed: ${msg}${hint}`);
-      }
-    } else {
-      throw new Error(`attach failed: ${msg}${hint}`);
-    }
+    throw new Error(`attach failed: ${lastError}${hint}`);
   }
   attached.add(tabId);
 
@@ -72,26 +105,48 @@ async function ensureAttached(tabId: number): Promise<void> {
   }
 }
 
-export async function evaluate(tabId: number, expression: string): Promise<unknown> {
-  await ensureAttached(tabId);
+export async function evaluate(tabId: number, expression: string, aggressiveRetry: boolean = false): Promise<unknown> {
+  // Retry the entire evaluate (attach + command).
+  // Normal: 2 retries. Operate: 3 retries (tolerates extension interference).
+  const MAX_EVAL_RETRIES = aggressiveRetry ? 3 : 2;
+  for (let attempt = 1; attempt <= MAX_EVAL_RETRIES; attempt++) {
+    try {
+      await ensureAttached(tabId, aggressiveRetry);
 
-  const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  }) as {
-    result?: { type: string; value?: unknown; description?: string; subtype?: string };
-    exceptionDetails?: { exception?: { description?: string }; text?: string };
-  };
+      const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      }) as {
+        result?: { type: string; value?: unknown; description?: string; subtype?: string };
+        exceptionDetails?: { exception?: { description?: string }; text?: string };
+      };
 
-  if (result.exceptionDetails) {
-    const errMsg = result.exceptionDetails.exception?.description
-      || result.exceptionDetails.text
-      || 'Eval error';
-    throw new Error(errMsg);
+      if (result.exceptionDetails) {
+        const errMsg = result.exceptionDetails.exception?.description
+          || result.exceptionDetails.text
+          || 'Eval error';
+        throw new Error(errMsg);
+      }
+
+      return result.result?.value;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Only retry on attach/debugger errors, not on JS eval errors
+      const isNavigateError = msg.includes('Inspected target navigated') || msg.includes('Target closed');
+      const isAttachError = isNavigateError || msg.includes('attach failed') || msg.includes('Debugger is not attached')
+        || msg.includes('chrome-extension://');
+      if (isAttachError && attempt < MAX_EVAL_RETRIES) {
+        attached.delete(tabId); // Force re-attach on next attempt
+        // SPA navigations recover quickly; debugger detach needs longer
+        const retryMs = isNavigateError ? 200 : 500;
+        await new Promise(resolve => setTimeout(resolve, retryMs));
+        continue;
+      }
+      throw e;
+    }
   }
-
-  return result.result?.value;
+  throw new Error('evaluate: max retries exhausted');
 }
 
 export const evaluateAsync = evaluate;
@@ -144,6 +199,48 @@ export async function screenshot(
       await chrome.debugger.sendCommand({ tabId }, 'Emulation.clearDeviceMetricsOverride').catch(() => {});
     }
   }
+}
+
+/**
+ * Set local file paths on a file input element via CDP DOM.setFileInputFiles.
+ * This bypasses the need to send large base64 payloads through the message channel —
+ * Chrome reads the files directly from the local filesystem.
+ *
+ * @param tabId - Target tab ID
+ * @param files - Array of absolute local file paths
+ * @param selector - CSS selector to find the file input (optional, defaults to first file input)
+ */
+export async function setFileInputFiles(
+  tabId: number,
+  files: string[],
+  selector?: string,
+): Promise<void> {
+  await ensureAttached(tabId);
+
+  // Enable DOM domain (required for DOM.querySelector and DOM.setFileInputFiles)
+  await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
+
+  // Get the document root
+  const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument') as {
+    root: { nodeId: number };
+  };
+
+  // Find the file input element
+  const query = selector || 'input[type="file"]';
+  const result = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+    nodeId: doc.root.nodeId,
+    selector: query,
+  }) as { nodeId: number };
+
+  if (!result.nodeId) {
+    throw new Error(`No element found matching selector: ${query}`);
+  }
+
+  // Set files directly via CDP — Chrome reads from local filesystem
+  await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
+    files,
+    nodeId: result.nodeId,
+  });
 }
 
 export async function detach(tabId: number): Promise<void> {

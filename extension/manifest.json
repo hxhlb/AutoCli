@@ -1,14 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "OpenCLI",
-  "version": "1.2.6",
-  "description": "Bridge between opencli CLI and your browser — execute commands, read cookies, manage tabs.",
+  "name": "AutoCLI",
+  "version": "1.5.5",
+  "description": "Browser automation bridge for AutoCLI.ai — executes commands in isolated Chrome windows via a local daemon.",
   "permissions": [
     "debugger",
+    "scripting",
     "tabs",
     "cookies",
     "activeTab",
     "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "dist/background.js",
@@ -21,11 +25,14 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "OpenCLI",
+    "default_title": "AutoCLI",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
     }
   },
-  "homepage_url": "https://github.com/jackwener/opencli"
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "homepage_url": "https://autocli.ai"
 }
